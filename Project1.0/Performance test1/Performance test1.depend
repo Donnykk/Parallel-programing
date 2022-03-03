@@ -1,0 +1,6 @@
+# depslib dependency file v1.0
+1646292665 source:f:\environment\parallel program\performance test1\main.cpp
+	<iostream>
+	<windows.h>
+	<stdlib.h>
+
