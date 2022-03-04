@@ -9,13 +9,13 @@ int main()
     cin >> n;
     float* a = new float[n];
     for(int i=0;i<n;i++){
-        cin >> a[i];
+        a[i] = 10 * i;
     }
     float** b = new float*[n];
     for(int i=0;i<n;i++){
         b[i] = new float[n];
         for(int j=0;j<n;j++){
-            cin >> b[i][j];
+            b[i][j] = i * j;
         }
     }
     float* sum = new float[n];
