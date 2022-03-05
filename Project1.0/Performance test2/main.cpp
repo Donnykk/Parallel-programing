@@ -6,19 +6,11 @@ int sum_(int* arr, int n){
     if(n==1){
         return arr[0];
     } else {
-        if(n % 2 == 0){
-            for(int i=0;i<n/2;i++){
-                arr[i] += arr[n-i-1];
-            }
-            n = n/2;
-            sum_(arr, n);
-        } else {
-            for(int i=0;i<n/2;i++){
-                arr[i] += arr[n-i-1];
-            }
-            n = n/2 + 1;
-            sum_(arr, n);
+        for(int i=0;i<n/2;i++){
+            arr[i] += arr[n-i-1];
         }
+        n = n/2;
+        sum_(arr, n);
     }
 }
 
@@ -44,17 +36,9 @@ int main()
     long long head_, tail_, freq_;
     QueryPerformanceFrequency((LARGE_INTEGER *)&freq_);
     QueryPerformanceCounter((LARGE_INTEGER *)&head_);
-    if(n % 2 == 0){
-        for(int i=0;i<n;i+=2){
-            sum1+=arr[i];
-            sum2+=arr[i+1];
-        }
-    } else{
-         for(int i=0;i<n-1;i+=2){
-            sum1+=arr[i];
-            sum2+=arr[i+1];
-        }
-        sum1+=arr[n-1];
+    for(int i=0;i<n;i+=2){
+        sum1+=arr[i];
+        sum2+=arr[i+1];
     }
     sum = sum1+sum2;
     QueryPerformanceCounter((LARGE_INTEGER *)&tail_);
