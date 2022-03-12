@@ -7,7 +7,7 @@ int main()
     cin >> n;
     int* arr = new int[n];
     for(int i=0;i<n;i++){
-        arr[i] = 10*i + 10;
+        arr[i] = i+100;
     }
 
     long long head, tail, freq;

@@ -1,0 +1,6 @@
+# depslib dependency file v1.0
+1647048911 source:f:\environment\parallel program\project1.0\performance test_arm_1\main.cpp
+	<iostream>
+	<sys/time.h>
+	<math.h>
+
