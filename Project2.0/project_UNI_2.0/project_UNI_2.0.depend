@@ -1,0 +1,10 @@
+# depslib dependency file v1.0
+1649682038 source:f:\environment\parallel program\project2.0\project_uni_2.0\main.cpp
+	<iostream>
+	<fstream>
+	<string>
+	<sstream>
+	<cmath>
+	<map>
+	<tmmintrin.h>
+
