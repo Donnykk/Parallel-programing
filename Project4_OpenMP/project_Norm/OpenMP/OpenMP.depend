@@ -1,0 +1,8 @@
+# depslib dependency file v1.0
+1652709076 source:f:\environment\parallel program\project4_openmp\project_norm\openmp\norm_gauss_sse.cpp
+	<omp.h>
+	<iostream>
+	<cstdlib>
+	<immintrin.h>
+	<sys/time.h>
+
