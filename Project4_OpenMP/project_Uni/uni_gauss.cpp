@@ -6,6 +6,8 @@
 #include <map>
 #include <arm_neon.h>
 #include <sys/time.h>
+#include <omp.h>
+#include <cstdlib>
 #define millitime(x) (x.tv_sec * 1000 + x.tv_usec / 1000.0)
 #define num_col 130
 #define num_row 22
@@ -76,140 +78,10 @@ void Uni_Gauss()
 			if (!(lp_Row.find(lp[i]) == lp_Row.end()))
 			{
 				int rowR = lp_Row[lp[i]];
+				int j;
 				bool modified = false;
 				for (int j = 0; j < totalCols - 1; j++)
 					bitmap[i][j] ^= bitmap[rowR][j];
-				for (int j = totalCols - 1; j >= 0; j--)
-				{
-					if (bitmap[i][j] != 0)
-					{
-						modified = true;
-						for (int k = 31; k >= 0; k--)
-						{
-							if ((bitmap[i][j] & (1 << k)) != 0)
-							{
-								lp[i] = j * 32 + k;
-								break;
-							}
-						}
-						break;
-					}
-				}
-				if (modified == false)
-					lp[i] = -1;
-			}
-			else
-			{
-				lp_Row[lp[i]] = i;
-				break;
-			}
-		}
-	}
-}
-
-pthread_barrier_t barrier1;
-pthread_barrier_t barrier2;
-pthread_barrier_t barrier3;
-
-void *threadFunc(void *param)
-{
-	long long t_id = (long long)param;
-	for (int i = 0; i < num_ele; i++)
-	{
-		while (lp[i] > -1)
-		{
-			if (!(lp_Row.find(lp[i]) == lp_Row.end()))
-			{
-				int rowR = lp_Row[lp[i]];
-				for (int j = t_id; j < totalCols - 1; j += count_T)
-					bitmap[i][j] ^= bitmap[rowR][j];
-			}
-			else
-			{
-				pthread_barrier_wait(&barrier3);
-				lp_Row[lp[i]] = i;
-				break;
-			}
-			pthread_barrier_wait(&barrier1);
-			if (t_id == 0)
-			{
-				bool modified = false;
-				for (int j = totalCols - 1; j >= 0; j--)
-				{
-					if (bitmap[i][j] != 0)
-					{
-						modified = true;
-						for (int k = 31; k >= 0; k--)
-						{
-							if ((bitmap[i][j] & (1 << k)) != 0)
-							{
-								lp[i] = j * 32 + k;
-								break;
-							}
-						}
-						break;
-					}
-				}
-				if (modified == false)
-					lp[i] = -1;
-			}
-			pthread_barrier_wait(&barrier2);
-		}
-	}
-	pthread_exit(NULL);
-}
-
-void PThread_Uni_Gauss()
-{
-	pthread_barrier_init(&barrier1, NULL, count_T);
-	pthread_barrier_init(&barrier2, NULL, count_T);
-	pthread_barrier_init(&barrier3, NULL, count_T);
-	pthread_t handles[count_T];
-	threadParam_t param[count_T];
-	for (int t_id = 0; t_id < count_T; t_id++)
-	{
-		param[t_id].t_id = t_id;
-		pthread_create(handles + t_id, NULL, threadFunc, (void *)(long long)t_id);
-	}
-	for (int i = 0; i < count_T; i++)
-		pthread_join(handles[i], NULL);
-	pthread_barrier_destroy(&barrier1);
-	pthread_barrier_destroy(&barrier2);
-	pthread_barrier_destroy(&barrier3);
-}
-
-void *threadFunc_plus(void *param)
-{
-	long long t_id = (long long)param;
-	for (int i = 0; i < num_ele; i++)
-	{
-		while (lp[i] > -1)
-		{
-			int j = t_id;
-			if (!(lp_Row.find(lp[i]) == lp_Row.end()))
-			{
-				int rowR = lp_Row[lp[i]];
-				int32x4_t v0, v1;
-				for (; j <= totalCols - 4 * count_T; j += 4 * count_T)
-				{
-					v0 = vld1q_s32(bitmap[i] + j);
-					v1 = vld1q_s32(bitmap[rowR] + j);
-					v0 = veorq_s32(v0, v1);
-					vst1q_s32(bitmap[i] + j, v0);
-				}
-				for (; j < totalCols - 1; j += count_T)
-					bitmap[i][j] ^= bitmap[rowR][j];
-			}
-			else
-			{
-				pthread_barrier_wait(&barrier3);
-				lp_Row[lp[i]] = i;
-				break;
-			}
-			pthread_barrier_wait(&barrier1);
-			if (t_id == 0)
-			{
-				bool modified = false;
 				for (j = totalCols - 1; j >= 3; j -= 4)
 				{
 					int x = ((bitmap[i][j] | bitmap[i][j - 1]) | (bitmap[i][j - 2] | bitmap[i][j - 3]));
@@ -236,29 +108,133 @@ void *threadFunc_plus(void *param)
 				if (modified == false)
 					lp[i] = -1;
 			}
-			pthread_barrier_wait(&barrier2);
+			else
+			{
+				lp_Row[lp[i]] = i;
+				break;
+			}
 		}
 	}
-	pthread_exit(NULL);
 }
 
-void PThread_Neon_Uni_Gauss()
+void OpenMP_Uni_Gauss()
 {
-	pthread_barrier_init(&barrier1, NULL, count_T);
-	pthread_barrier_init(&barrier2, NULL, count_T);
-	pthread_barrier_init(&barrier3, NULL, count_T);
-	pthread_t handles[count_T];
-	threadParam_t param[count_T];
-	for (int t_id = 0; t_id < count_T; t_id++)
+	int i, j, rowR;
+	bool modified;
+#pragma omp parallel num_threads(count_T), private(i, j, rowR, modified)
+	for (i = 0; i < num_ele; i++)
 	{
-		param[t_id].t_id = t_id;
-		pthread_create(handles + t_id, NULL, threadFunc_plus, (void *)(long long)t_id);
+		while (lp[i] > -1)
+		{
+			if (!(lp_Row.find(lp[i]) == lp_Row.end()))
+			{
+				rowR = lp_Row[lp[i]];
+#pragma omp for
+				for (j = 0; j < totalCols; j++)
+				{
+					bitmap[i][j] ^= bitmap[rowR][j];
+				}
+#pragma omp master
+				{
+					modified = false;
+					for (j = totalCols - 1; j >= 3; j -= 4)
+					{
+						int x = ((bitmap[i][j] | bitmap[i][j - 1]) | (bitmap[i][j - 2] | bitmap[i][j - 3]));
+						if (x == 0)
+							continue;
+						break;
+					}
+					for (j; j >= 0; j--)
+					{
+						if (bitmap[i][j] != 0)
+						{
+							modified = true;
+							for (int k = 31; k >= 0; k--)
+							{
+								if ((bitmap[i][j] & (1 << k)) != 0)
+								{
+									lp[i] = j * 32 + k;
+									break;
+								}
+							}
+							break;
+						}
+					}
+					if (modified == false)
+						lp[i] = -1;
+				}
+#pragma omp barrier
+			}
+			else
+			{
+#pragma omp barrier
+#pragma omp master
+				lp_Row[lp[i]] = i;
+				break;
+#pragma omp barrier
+			}
+		}
 	}
-	for (int i = 0; i < count_T; i++)
-		pthread_join(handles[i], NULL);
-	pthread_barrier_destroy(&barrier1);
-	pthread_barrier_destroy(&barrier2);
-	pthread_barrier_destroy(&barrier3);
+}
+
+void OpenMP_SIMD_Uni_Gauss()
+{
+	int i, j, rowR;
+	bool modified;
+#pragma omp parallel num_threads(count_T), private(i, j, rowR, modified)
+	for (i = 0; i < num_ele; i++)
+	{
+		while (lp[i] > -1)
+		{
+			if (!(lp_Row.find(lp[i]) == lp_Row.end()))
+			{
+				rowR = lp_Row[lp[i]];
+#pragma omp for simd safelen(4)
+				for (j = 0; j < totalCols; j++)
+				{
+					bitmap[i][j] ^= bitmap[rowR][j];
+				}
+#pragma omp master
+				{
+					modified = false;
+					for (j = totalCols - 1; j >= 3; j -= 4)
+					{
+						int x = ((bitmap[i][j] | bitmap[i][j - 1]) | (bitmap[i][j - 2] | bitmap[i][j - 3]));
+						if (x == 0)
+							continue;
+						break;
+					}
+					for (j; j >= 0; j--)
+					{
+						if (bitmap[i][j] != 0)
+						{
+							modified = true;
+							for (int k = 31; k >= 0; k--)
+							{
+								if ((bitmap[i][j] & (1 << k)) != 0)
+								{
+									lp[i] = j * 32 + k;
+									break;
+								}
+							}
+							break;
+						}
+					}
+					if (modified == false)
+						lp[i] = -1;
+				}
+#pragma omp barrier
+			}
+			else
+			{
+#pragma omp barrier
+#pragma omp master
+				lp_Row[lp[i]] = i;
+				break;
+#pragma omp barrier
+			}
+		}
+	}
 }
 
 void check()
@@ -324,20 +300,20 @@ void timer(void (*func)())
 
 int main()
 {
-	cout << "线程数:4" <<endl;
+	cout << "线程数:4" << endl;
 	timer(Uni_Gauss);
 	check();
-	timer(PThread_Uni_Gauss);
+	timer(OpenMP_Uni_Gauss);
 	check();
-	timer(PThread_Neon_Uni_Gauss);
+	timer(OpenMP_SIMD_Uni_Gauss);
 	check();
 	count_T = 8;
-	cout << "线程数:8" <<endl;
+	cout << "线程数:8" << endl;
 	timer(Uni_Gauss);
 	check();
-	timer(PThread_Uni_Gauss);
+	timer(OpenMP_Uni_Gauss);
 	check();
-	timer(PThread_Neon_Uni_Gauss);
+	timer(OpenMP_SIMD_Uni_Gauss);
 	check();
 	return 0;
 }

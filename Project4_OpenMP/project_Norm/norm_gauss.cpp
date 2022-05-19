@@ -81,6 +81,7 @@ void gauss_OpenMP()
 void gauss_Neon()
 {
 	int i, j, k;
+	int chunksize = 10;
 	float temp;
 #pragma omp parallel num_threads(count_T), private(i, j, k, temp)
 	for (k = 0; k < n; k++)
@@ -112,10 +113,10 @@ void gauss_Neon()
 	}
 }
 
-void guass_OpenMp_staticChunk1()
+void guass_OpenMp_staticChunk()
 {
 	int i, j, k;
-	int chunksize = 1;
+	int chunksize = 128;
 	float temp;
 #pragma omp parallel num_threads(count_T), private(i, j, k, temp)
 	for (k = 0; k < n; k++)
@@ -138,36 +139,10 @@ void guass_OpenMp_staticChunk1()
 	}
 }
 
-void guass_OpenMp_staticChunk2()
+void guass_OpenMp_dynamicChunk()
 {
 	int i, j, k;
-	int chunksize = 10;
-	float temp;
-#pragma omp parallel num_threads(count_T), private(i, j, k, temp)
-	for (k = 0; k < n; k++)
-	{
-#pragma omp single
-		{
-			temp = arr[k][k];
-			for (j = k + 1; j < n; j++)
-				arr[k][j] = arr[k][j] / temp;
-			arr[k][k] = 1.0;
-		}
-#pragma omp for schedule(static, chunksize)
-		for (i = k + 1; i < n; i++)
-		{
-			temp = arr[i][k];
-			for (j = k + 1; j < n; j++)
-				arr[i][j] = arr[i][j] - temp * arr[k][j];
-			arr[i][k] = 0;
-		}
-	}
-}
-
-void guass_OpenMp_dynamicChunk1()
-{
-	int i, j, k;
-	int chunksize = 1;
+	int chunksize = 128;
 	float temp;
 #pragma omp parallel num_threads(count_T), private(i, j, k, temp)
 	for (k = 0; k < n; k++)
@@ -190,62 +165,10 @@ void guass_OpenMp_dynamicChunk1()
 	}
 }
 
-void guass_OpenMp_dynamicChunk2()
+void guass_OpenMp_guidedChunk()
 {
 	int i, j, k;
-	int chunksize = 10;
-	float temp;
-#pragma omp parallel num_threads(count_T), private(i, j, k, temp)
-	for (k = 0; k < n; k++)
-	{
-#pragma omp single
-		{
-			temp = arr[k][k];
-			for (j = k + 1; j < n; j++)
-				arr[k][j] = arr[k][j] / temp;
-			arr[k][k] = 1.0;
-		}
-#pragma omp for schedule(dynamic, chunksize)
-		for (i = k + 1; i < n; i++)
-		{
-			temp = arr[i][k];
-			for (j = k + 1; j < n; j++)
-				arr[i][j] = arr[i][j] - temp * arr[k][j];
-			arr[i][k] = 0;
-		}
-	}
-}
-
-void guass_OpenMp_guidedChunk1()
-{
-	int i, j, k;
-	int chunksize = 1;
-	float temp;
-#pragma omp parallel num_threads(count_T), private(i, j, k, temp)
-	for (k = 0; k < n; k++)
-	{
-#pragma omp single
-		{
-			temp = arr[k][k];
-			for (j = k + 1; j < n; j++)
-				arr[k][j] = arr[k][j] / temp;
-			arr[k][k] = 1.0;
-		}
-#pragma omp for schedule(guided, chunksize)
-		for (i = k + 1; i < n; i++)
-		{
-			temp = arr[i][k];
-			for (j = k + 1; j < n; j++)
-				arr[i][j] = arr[i][j] - temp * arr[k][j];
-			arr[i][k] = 0;
-		}
-	}
-}
-
-void guass_OpenMp_guidedChunk2()
-{
-	int i, j, k;
-	int chunksize = 10;
+	int chunksize = 128;
 	float temp;
 #pragma omp parallel num_threads(count_T), private(i, j, k, temp)
 	for (k = 0; k < n; k++)
@@ -271,18 +194,21 @@ void guass_OpenMp_guidedChunk2()
 void func(void (*f)())
 {
 	int counter = 0;
-	initial(n);
-	timeval start, finish, now;
-	gettimeofday(&start, NULL);
+	timeval begin, start, finish, now;
+	float milliseconds = 0;
+	gettimeofday(&begin, NULL);
 	gettimeofday(&now, NULL);
-	while (millitime(now) - millitime(start) < 10)
+	while (millitime(now) - millitime(begin) < 10)
 	{
+		initial(n);
 		counter++;
+		gettimeofday(&start, NULL);
 		f();
+		gettimeofday(&finish, NULL);
+		milliseconds += (millitime(finish) - millitime(start));
 		gettimeofday(&now, NULL);
 	}
-	gettimeofday(&finish, NULL);
-	cout << (millitime(finish) - millitime(start)) / counter << endl;
+	cout << milliseconds / counter << endl;
 }
 
 int main()
@@ -302,30 +228,20 @@ int main()
 		cout << endl
 			 << "gauss_Neon: ";
 		func(gauss_Neon);
-		// static线程划分，size=1
+		/*
+		// static线程划分
 		cout << endl
-			 << "gauss_OpenMP_staticChunk1: ";
-		func(guass_OpenMp_staticChunk1);
-		// static线程划分，size=10
+			 << "gauss_OpenMP_staticChunk: ";
+		func(guass_OpenMp_staticChunk);
+		// dynamic线程划分
 		cout << endl
-			 << "gauss_OpenMP_staticChunk2: ";
-		func(guass_OpenMp_staticChunk2);
-		// dynamic线程划分，size=1
+			 << "gauss_OpenMP_dynamicChunk: ";
+		func(guass_OpenMp_dynamicChunk);
+		// guided线程划分
 		cout << endl
-			 << "gauss_OpenMP_dynamicChunk1: ";
-		func(guass_OpenMp_dynamicChunk1);
-		// dynamic线程划分，size=10
-		cout << endl
-			 << "gauss_OpenMP_dynamicChunk2: ";
-		func(guass_OpenMp_dynamicChunk2);
-		// guided线程划分，size=1
-		cout << endl
-			 << "gauss_OpenMP_guidedChunk1: ";
-		func(guass_OpenMp_guidedChunk1);
-		// guided线程划分，size=10
-		cout << endl
-			 << "gauss_OpenMP_guidedChunk2: ";
-		func(guass_OpenMp_guidedChunk2);
+			 << "gauss_OpenMP_guidedChunk: ";
+		func(guass_OpenMp_guidedChunk);
+		*/
 		n *= 2;
 		cout << endl;
 	}

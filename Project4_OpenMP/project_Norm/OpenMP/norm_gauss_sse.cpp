@@ -66,7 +66,7 @@ void gauss_OpenMP()
 				arr[k][j] = arr[k][j] / temp;
 			arr[k][k] = 1.0;
 		}
-//并行部分
+//并行部分c
 #pragma omp for
 		for (i = k + 1; i < n; i++)
 		{
@@ -80,40 +80,37 @@ void gauss_OpenMP()
 
 void gauss_SSE()
 {
-	__m128 vt, va, temp1, temp2, temp3;
-	int i, j, k;
-	float temp;
-#pragma omp parallel num_threads(count_T), private(i, j, k, temp)
-	for (k = 0; k < n; k++)
-	{
-#pragma omp single
-		{
-			temp = arr[k][k];
-			for (j = k + 1; j < n; j++)
-				arr[k][j] = arr[k][j] / temp;
-			arr[k][k] = 1.0;
-		}
-#pragma omp for
-		for (i = k + 1; i < n; i++)
-		{
-			for (j = k; j < n; j += 4)
-			{
-				if (j + 4 > n)
-				{
-					for (; j < n; j++)
-						arr[i][j] = arr[i][j] - arr[i][k] * arr[k][j];
-				}
-				else
-				{
-					temp1 = _mm_loadu_ps(arr[i] + j);
-					temp2 = _mm_loadu_ps(arr[k] + j);
-					temp3 = _mm_set1_ps(arr[i][k]);
-					temp2 = _mm_mul_ps(temp3, temp2);
-					temp1 = _mm_sub_ps(temp1, temp2);
-					_mm_storeu_ps(arr[i] + j, temp1);
-				}
-				arr[i][k] = 0;
+	__m128 v0, v1, v2;
+    int i, j, k;
+	float ele;
+    #pragma omp parallel num_threads(thread_count), private(v0, v1, v2, i, j, k, ele)
+	for (k = 0; k < n; k++) {
+        #pragma omp single
+        {
+			ele = arr[k][k];
+            v1 = _mm_set_ps(arr[k][k], arr[k][k], arr[k][k], arr[k][k]);
+            for (j = k + 1; j <= n - 4; j += 4) {
+				v0 = _mm_loadu_ps(arr[k] + j);
+                v0 = _mm_div_ps(v0, v1);
+                _mm_storeu_ps(arr[k] + j, v0);
+            }
+            for (j; j < n; j++)
+                arr[k][j] = arr[k][j] / ele;
+            arr[k][k] = 1.0;
+        }
+        #pragma omp for
+		for (i = k + 1; i < n; i++) {
+            v1 = _mm_set_ps(arr[i][k], arr[i][k], arr[i][k], arr[i][k]);
+			for (j = k + 1; j <= n - 4; j += 4) {
+			    v2 = _mm_loadu_ps(arr[k] + j);
+                v0 = _mm_loadu_ps(arr[i] + j);
+                v2 = _mm_mul_ps(v1, v2);
+                v0 = _mm_sub_ps(v0, v2);
+				_mm_storeu_ps(arr[i] + j, v0);
 			}
+			for (; j < n; j++)
+				arr[i][j] = arr[i][j] - arr[i][k] * arr[k][j];
+			arr[i][k] = 0;
 		}
 	}
 }
@@ -121,18 +118,21 @@ void gauss_SSE()
 void func(void (*f)())
 {
 	int counter = 0;
-	initial(n);
-	timeval start, finish, now;
-	gettimeofday(&start, NULL);
+	timeval begin, start, finish, now;
+	float milliseconds = 0;
+	gettimeofday(&begin, NULL);
 	gettimeofday(&now, NULL);
-	while (millitime(now) - millitime(start) < 10)
+	while (millitime(now) - millitime(begin) < 10)
 	{
+		initial(n);
 		counter++;
+		gettimeofday(&start, NULL);
 		f();
+		gettimeofday(&finish, NULL);
+		milliseconds += (millitime(finish) - millitime(start));
 		gettimeofday(&now, NULL);
 	}
-	gettimeofday(&finish, NULL);
-	cout << (millitime(finish) - millitime(start)) / counter << endl;
+	cout << milliseconds / counter << endl;
 }
 
 int main()
