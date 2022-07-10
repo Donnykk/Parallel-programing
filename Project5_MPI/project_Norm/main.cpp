@@ -1,788 +1,445 @@
 #include <iostream>
-#include <mpi.h>
-#include <sys/time.h>
-#include <stdlib.h>
-#include <pmmintrin.h>
 #include <omp.h>
+#include <vector>
+#include <cstdlib>
+#include <string>
+#include <fstream>
+#include <sys/time.h>
+#include <mpi.h>
+#include <pmmintrin.h>
+#include <cmath>
+#define millitime(x) (x.tv_sec * 1000 + x.tv_usec / 1000.0)
 using namespace std;
-using namespace MPI;
 
-static const int N = 1000;
-static const int task = 1;
-static const int thread_count = 4;
+int n, thread_count;
+float **A = NULL, **mother = NULL;
 
-float test[N][N] = {0};
-float mat[N][N] = {0};
-
-void init_mat(float test[][N])
-{
-    srand((unsigned)time(NULL));
-    for (int i = 0; i < N; i++)
-        for (int j = 0; j < N; j++)
-            test[i][j] = rand() / 100;
+void init() {
+	A = new float*[n];
+	mother = new float*[n];
+	for (int i = 0; i < n; i++) {
+		A[i] = new float[n];
+		mother[i] = new float[n];
+		for (int j = 0; j < n; j++) {
+            A[i][j] = 0;
+            mother[i][j] = 0;
+		}
+	}
+	for (int i = 0; i < n; i++)
+		for (int j = i; j < n; j++)
+			mother[i][j] = (j == i) ? 1 : i + j;
 }
 
-void reset_mat(float mat[][N], float test[][N])
-{
-    for (int i = 0; i < N; i++)
-        for (int j = 0; j < N; j++)
-            mat[i][j] = test[i][j];
+void release_matrix() {
+	for (int i = 0; i < n; i++) {
+		delete[] A[i];
+		delete[] mother[i];
+	}
+	delete[] A;
+	delete[] mother;
 }
 
-void naive_lu(float mat[][N])
-{
-    for (int k = 0; k < N; k++)
-    {
-        for (int j = k + 1; j < N; j++)
-            mat[k][j] = mat[k][j] / mat[k][k];
-        mat[k][k] = 1.0;
-        for (int i = k + 1; i < N; i++)
-        {
-            for (int j = k + 1; j < N; j++)
-                mat[i][j] = mat[i][j] - mat[i][k] * mat[k][j];
-            mat[i][k] = 0.0;
-        }
-    }
+void arr_reset() {
+	for (int i = 0; i < n; i++)
+		for (int j = 0; j < n; j++)
+			A[i][j] = mother[i][j];
+	for (int i = 1; i < n; i++)
+		for (int j = 0; j < i; j++)
+			for (int k = 0; k < n; k++)
+				A[i][k] += mother[j][k];
 }
 
-void print_mat(float mat[][N])
-{
-    if (N > 16)
-        return;
-    cout << endl;
-    for (int i = 0; i < N; i++)
-    {
-        for (int j = 0; j < N; j++)
-            cout << mat[i][j] << " ";
-        cout << endl;
-    }
-    cout << endl;
+void printResult() {
+	for (int i = 0; i < n; i++) {
+		for (int j = 0; j < n; j++) {
+			cout << mother[i][j] << ' ';
+		}
+		cout << endl;
+	}
+	cout << endl;
+	for (int i = 0; i < n; i++) {
+		for (int j = 0; j < n; j++) {
+			cout << A[i][j] << ' ';
+		}
+		cout << endl;
+	}
 }
 
-class MPI_Block
+void testResult() {
+	for (int i = 0; i < n; i++)
+		for (int j = 0; j < n; j++)
+			if (abs(A[i][j] - mother[i][j]) >= 1e-5) {
+				cout << "Something wrong!" << endl;
+				cout << i << ' ' << j << ' ' << A[i][j] << ' ' << mother[i][j] << endl;
+				exit(-1);
+			}
+}
+
+void block_run(int version);
+
+void block_gauss(int, int);
+
+void block_gauss_opt(int, int);
+
+void recycle_run(int version);
+
+void recycle_gauss(int, int);
+
+void recycle_gauss_opt(int, int);
+
+void recycle_pipeline_gauss(int, int);
+
+void recycle_pipeline_gauss_opt(int, int);
+
+int main(int argc, char *argv[])
 {
-public:
-    void eliminate(float mat[][N], int rank, int num_proc)
-    {
-        int block = N / num_proc;
-        //    未能整除划分的剩余部分
-        int remain = N % num_proc;
-
-        int begin = rank * block;
-        //    当前进程为最后一个进程时，需处理剩余部分
-        int end = rank != num_proc - 1 ? begin + block : begin + block + remain;
-        for (int k = 0; k < N; k++)
-        {
-            //        判断当前行是否是自己的任务
-            if (k >= begin && k < end)
-            {
-                for (int j = k + 1; j < N; j++)
-                    mat[k][j] = mat[k][j] / mat[k][k];
-                mat[k][k] = 1.0;
-                //            向之后的进程发送消息
-                for (int p = rank + 1; p < num_proc; p++)
-                    MPI_Send(mat[k], N, MPI_FLOAT, p, 2, MPI_COMM_WORLD);
-            }
-            else
-            {
-                int cur_p = k / block;
-                //            当所处行属于当前进程前一进程的任务，需接收消息
-                if (cur_p < rank)
-                    MPI_Recv(mat[k], N, MPI_FLOAT, cur_p, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            }
-            for (int i = begin; i < end && i < N; i++)
-            {
-                if (i >= k + 1)
-                {
-                    for (int j = k + 1; j < N; j++)
-                        mat[i][j] = mat[i][j] - mat[i][k] * mat[k][j];
-                    mat[i][k] = 0.0;
-                }
-            }
-        }
-    }
-
-    void run()
-    {
-        timeval t_start;
-        timeval t_end;
-
-        int num_proc;
-        int rank;
-
-        MPI_Comm_size(MPI_COMM_WORLD, &num_proc);
-        MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-
-        int block = N / num_proc;
-        int remain = N % num_proc;
-        if (rank == 0)
-        {
-            reset_mat(mat, test);
-            gettimeofday(&t_start, NULL);
-            //        在0号进程进行任务划分
-            for (int i = 1; i < num_proc; i++)
-            {
-                if (i != num_proc - 1)
-                {
-                    for (int j = 0; j < block; j++)
-                        MPI_Send(mat[i * block + j], N, MPI_FLOAT, i, 0, MPI_COMM_WORLD);
-                }
-                else
-                {
-                    for (int j = 0; j < block + remain; j++)
-                        MPI_Send(mat[i * block + j], N, MPI_FLOAT, i, 0, MPI_COMM_WORLD);
-                }
-            }
-            eliminate(mat, rank, num_proc);
-            //        处理完0号进程自己的任务后需接收其他进程处理之后的结果
-            for (int i = 1; i < num_proc; i++)
-            {
-                if (i != num_proc - 1)
-                {
-                    for (int j = 0; j < block; j++)
-                        MPI_Recv(mat[i * block + j], N, MPI_FLOAT, i, 1,
-                                 MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-                }
-                else
-                {
-                    for (int j = 0; j < block + remain; j++)
-                        MPI_Recv(mat[i * block + j], N, MPI_FLOAT, i, 1,
-                                 MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-                }
-            }
-            gettimeofday(&t_end, NULL);
-            cout << "Block MPI LU time cost: "
-                 << 1000 * (t_end.tv_sec - t_start.tv_sec) +
-                        0.001 * (t_end.tv_usec - t_start.tv_usec)
-                 << "ms" << endl;
-            print_mat(mat);
-        }
-        else
-        {
-            //        非0号进程先接收任务
-            if (rank != num_proc - 1)
-            {
-                for (int j = 0; j < block; j++)
-                    MPI_Recv(mat[rank * block + j], N, MPI_FLOAT, 0, 0,
-                             MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            }
-            else
-            {
-                for (int j = 0; j < block + remain; j++)
-                    MPI_Recv(mat[rank * block + j], N, MPI_FLOAT, 0, 0,
-                             MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            }
-            eliminate(mat, rank, num_proc);
-            //        处理完后向零号进程返回结果
-            if (rank != num_proc - 1)
-            {
-                for (int j = 0; j < block; j++)
-                    MPI_Send(mat[rank * block + j], N, MPI_FLOAT, 0, 1, MPI_COMM_WORLD);
-            }
-            else
-            {
-                for (int j = 0; j < block + remain; j++)
-                    MPI_Send(mat[rank * block + j], N, MPI_FLOAT, 0, 1, MPI_COMM_WORLD);
-            }
-        }
-    }
-
-    void eliminate_opt(float mat[][N], int rank, int num_proc)
-    {
-        __m128 t1, t2, t3;
-        int block = N / num_proc;
-        int remain = N % num_proc;
-        int begin = rank * block;
-        int end = rank != num_proc - 1 ? begin + block : begin + block + remain;
-#pragma omp parallel num_threads(thread_count)
-        for (int k = 0; k < N; k++)
-        {
-            if (k >= begin && k < end)
-            {
-                float temp1[4] = {mat[k][k], mat[k][k], mat[k][k], mat[k][k]};
-                t1 = _mm_loadu_ps(temp1);
-                int j = k + 1;
-#pragma omp for schedule(guided, 20)
-                for (j; j < N - 3; j += 4)
-                {
-                    t2 = _mm_loadu_ps(mat[k] + j);
-                    t3 = _mm_div_ps(t2, t1);
-                    _mm_storeu_ps(mat[k] + j, t3);
-                }
-#pragma omp for schedule(guided, 20)
-                for (j; j < N; j++)
-                {
-                    mat[k][j] = mat[k][j] / mat[k][k];
-                }
-                mat[k][k] = 1.0;
-                for (int p = rank + 1; p < num_proc; p++)
-                    MPI_Send(mat[k], N, MPI_FLOAT, p, 2, MPI_COMM_WORLD);
-            }
-            else
-            {
-                int cur_p = k / block;
-                if (cur_p < rank)
-                    MPI_Recv(mat[k], N, MPI_FLOAT, cur_p, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            }
-            for (int i = begin; i < end && i < N; i++)
-            {
-                if (i >= k + 1)
-                {
-                    float temp2[4] = {mat[i][k], mat[i][k], mat[i][k], mat[i][k]};
-                    t1 = _mm_loadu_ps(temp2);
-                    int j = k + 1;
-#pragma omp for schedule(guided, 20)
-                    for (j; j <= N - 3; j += 4)
-                    {
-                        t2 = _mm_loadu_ps(mat[i] + j);
-                        t3 = _mm_loadu_ps(mat[k] + j);
-                        t3 = _mm_mul_ps(t1, t3);
-                        t2 = _mm_sub_ps(t2, t3);
-                        _mm_storeu_ps(mat[i] + j, t2);
-                    }
-#pragma omp for schedule(guided, 20)
-                    for (j; j < N; j++)
-                        mat[i][j] = mat[i][j] - mat[i][k] * mat[k][j];
-                    mat[i][k] = 0;
-                }
-            }
-        }
-    }
-
-    void run_opt()
-    {
-        timeval t_start;
-        timeval t_end;
-
-        int num_proc;
-        int rank;
-
-        MPI_Comm_size(MPI_COMM_WORLD, &num_proc);
-        MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-
-        int block = N / num_proc;
-        int remain = N % num_proc;
-        if (rank == 0)
-        {
-            reset_mat(mat, test);
-            gettimeofday(&t_start, NULL);
-            for (int i = 1; i < num_proc; i++)
-            {
-                if (i != num_proc - 1)
-                {
-                    for (int j = 0; j < block; j++)
-                        MPI_Send(mat[i * block + j], N, MPI_FLOAT, i, 0, MPI_COMM_WORLD);
-                }
-                else
-                {
-                    for (int j = 0; j < block + remain; j++)
-                        MPI_Send(mat[i * block + j], N, MPI_FLOAT, i, 0, MPI_COMM_WORLD);
-                }
-            }
-            eliminate_opt(mat, rank, num_proc);
-            for (int i = 1; i < num_proc; i++)
-            {
-                if (i != num_proc - 1)
-                {
-                    for (int j = 0; j < block; j++)
-                        MPI_Recv(mat[i * block + j], N, MPI_FLOAT, i, 1,
-                                 MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-                }
-                else
-                {
-                    for (int j = 0; j < block + remain; j++)
-                        MPI_Recv(mat[i * block + j], N, MPI_FLOAT, i, 1,
-                                 MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-                }
-            }
-            gettimeofday(&t_end, NULL);
-            cout << "Block MPI LU with SSE and OpenMP time cost: "
-                 << 1000 * (t_end.tv_sec - t_start.tv_sec) +
-                        0.001 * (t_end.tv_usec - t_start.tv_usec)
-                 << "ms" << endl;
-            print_mat(mat);
-        }
-        else
-        {
-            if (rank != num_proc - 1)
-            {
-                for (int j = 0; j < block; j++)
-                    MPI_Recv(mat[rank * block + j], N, MPI_FLOAT, 0, 0,
-                             MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            }
-            else
-            {
-                for (int j = 0; j < block + remain; j++)
-                    MPI_Recv(mat[rank * block + j], N, MPI_FLOAT, 0, 0,
-                             MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            }
-            eliminate_opt(mat, rank, num_proc);
-            if (rank != num_proc - 1)
-            {
-                for (int j = 0; j < block; j++)
-                    MPI_Send(mat[rank * block + j], N, MPI_FLOAT, 0, 1, MPI_COMM_WORLD);
-            }
-            else
-            {
-                for (int j = 0; j < block + remain; j++)
-                    MPI_Send(mat[rank * block + j], N, MPI_FLOAT, 0, 1, MPI_COMM_WORLD);
-            }
-        }
-    }
-};
-
-class MPI_Recycle
-{
-public:
-    void eliminate(float mat[][N], int rank, int num_proc)
-    {
-        //    所有进程进行1次迭代的计算行数
-        int seg = task * num_proc;
-        for (int k = 0; k < N; k++)
-        {
-            //        判断当前行是否是自己的任务
-            if (int((k % seg) / task) == rank)
-            {
-                for (int j = k + 1; j < N; j++)
-                    mat[k][j] = mat[k][j] / mat[k][k];
-                mat[k][k] = 1.0;
-                //            完成计算后向其他进程发送消息
-                for (int p = 0; p < num_proc; p++)
-                    if (p != rank)
-                        MPI_Send(mat[k], N, MPI_FLOAT, p, 2, MPI_COMM_WORLD);
-            }
-            else
-            {
-                //            如果当前行不是自己的任务，接收来自当前行处理进程的消息
-                MPI_Recv(mat[k], N, MPI_FLOAT, int((k % seg) / task), 2,
-                         MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            }
-            for (int i = k + 1; i < N; i++)
-            {
-                if (int((i % seg) / task) == rank)
-                {
-                    for (int j = k + 1; j < N; j++)
-                        mat[i][j] = mat[i][j] - mat[i][k] * mat[k][j];
-                    mat[i][k] = 0.0;
-                }
-            }
-        }
-    }
-
-    void run()
-    {
-        timeval t_start;
-        timeval t_end;
-
-        int num_proc;
-        int rank;
-
-        MPI_Comm_size(MPI_COMM_WORLD, &num_proc);
-        MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-
-        int seg = task * num_proc;
-        if (rank == 0)
-        {
-            reset_mat(mat, test);
-            gettimeofday(&t_start, NULL);
-            //        在0号进程进行任务划分
-            for (int i = 0; i < N; i++)
-            {
-                int flag = (i % seg) / task;
-                if (flag == rank)
-                    continue;
-                else
-                    MPI_Send(mat[i], N, MPI_FLOAT, flag, 0, MPI_COMM_WORLD);
-            }
-            eliminate(mat, rank, num_proc);
-            //        处理完0号进程自己的任务后需接收其他进程处理之后的结果
-            for (int i = 0; i < N; i++)
-            {
-                int flag = (i % seg) / task;
-                if (flag == rank)
-                    continue;
-                else
-                    MPI_Recv(mat[i], N, MPI_FLOAT, flag, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            }
-            gettimeofday(&t_end, NULL);
-            cout << "Recycle MPI LU time cost: "
-                 << 1000 * (t_end.tv_sec - t_start.tv_sec) +
-                        0.001 * (t_end.tv_usec - t_start.tv_usec)
-                 << "ms" << endl;
-            print_mat(mat);
-        }
-        else
-        {
-            //        非0号进程先接收任务
-            for (int i = task * rank; i < N; i += seg)
-            {
-                for (int j = 0; j < task && i + j < N; j++)
-                    MPI_Recv(mat[i + j], N, MPI_FLOAT, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            }
-            eliminate(mat, rank, num_proc);
-            //        处理完后向零号进程返回结果
-            for (int i = task * rank; i < N; i += seg)
-            {
-                for (int j = 0; j < task && i + j < N; j++)
-                    MPI_Send(mat[i + j], N, MPI_FLOAT, 0, 1, MPI_COMM_WORLD);
-            }
-        }
-    }
-
-    void eliminate_opt(float mat[][N], int rank, int num_proc)
-    {
-        __m128 t1, t2, t3;
-        int seg = task * num_proc;
-#pragma omp parallel num_threads(thread_count)
-        for (int k = 0; k < N; k++)
-        {
-            if (int((k % seg) / task) == rank)
-            {
-                float temp1[4] = {mat[k][k], mat[k][k], mat[k][k], mat[k][k]};
-                t1 = _mm_loadu_ps(temp1);
-                int j = k + 1;
-#pragma omp for schedule(guided, 20)
-                for (j; j < N - 3; j += 4)
-                {
-                    t2 = _mm_loadu_ps(mat[k] + j);
-                    t3 = _mm_div_ps(t2, t1);
-                    _mm_storeu_ps(mat[k] + j, t3);
-                }
-#pragma omp for schedule(guided, 20)
-                for (j; j < N; j++)
-                {
-                    mat[k][j] = mat[k][j] / mat[k][k];
-                }
-                mat[k][k] = 1.0;
-
-                for (int p = 0; p < num_proc; p++)
-                    if (p != rank)
-                        MPI_Send(mat[k], N, MPI_FLOAT, p, 2, MPI_COMM_WORLD);
-            }
-            else
-            {
-                MPI_Recv(mat[k], N, MPI_FLOAT, int((k % seg) / task), 2,
-                         MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            }
-            for (int i = k + 1; i < N; i++)
-            {
-                if (int((i % seg) / task) == rank)
-                {
-                    float temp2[4] = {mat[i][k], mat[i][k], mat[i][k], mat[i][k]};
-                    t1 = _mm_loadu_ps(temp2);
-                    int j = k + 1;
-#pragma omp for schedule(guided, 20)
-                    for (j; j <= N - 3; j += 4)
-                    {
-                        t2 = _mm_loadu_ps(mat[i] + j);
-                        t3 = _mm_loadu_ps(mat[k] + j);
-                        t3 = _mm_mul_ps(t1, t3);
-                        t2 = _mm_sub_ps(t2, t3);
-                        _mm_storeu_ps(mat[i] + j, t2);
-                    }
-#pragma omp for schedule(guided, 20)
-                    for (j; j < N; j++)
-                        mat[i][j] = mat[i][j] - mat[i][k] * mat[k][j];
-                    mat[i][k] = 0;
-                }
-            }
-        }
-    }
-
-    void run_opt()
-    {
-        timeval t_start;
-        timeval t_end;
-
-        int num_proc;
-        int rank;
-
-        MPI_Comm_size(MPI_COMM_WORLD, &num_proc);
-        MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-
-        int seg = task * num_proc;
-        if (rank == 0)
-        {
-            reset_mat(mat, test);
-            gettimeofday(&t_start, NULL);
-            for (int i = 0; i < N; i++)
-            {
-                int flag = (i % seg) / task;
-                if (flag == rank)
-                    continue;
-                else
-                    MPI_Send(mat[i], N, MPI_FLOAT, flag, 0, MPI_COMM_WORLD);
-            }
-            eliminate_opt(mat, rank, num_proc);
-            for (int i = 0; i < N; i++)
-            {
-                int flag = (i % seg) / task;
-                if (flag == rank)
-                    continue;
-                else
-                    MPI_Recv(mat[i], N, MPI_FLOAT, flag, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            }
-            gettimeofday(&t_end, NULL);
-            cout << "Recycle MPI LU with SSE and OpenMP time cost: "
-                 << 1000 * (t_end.tv_sec - t_start.tv_sec) +
-                        0.001 * (t_end.tv_usec - t_start.tv_usec)
-                 << "ms" << endl;
-            print_mat(mat);
-        }
-        else
-        {
-            for (int i = task * rank; i < N; i += seg)
-            {
-                for (int j = 0; j < task && i + j < N; j++)
-                    MPI_Recv(mat[i + j], N, MPI_FLOAT, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            }
-            eliminate_opt(mat, rank, num_proc);
-            for (int i = task * rank; i < N; i += seg)
-            {
-                for (int j = 0; j < task && i + j < N; j++)
-                    MPI_Send(mat[i + j], N, MPI_FLOAT, 0, 1, MPI_COMM_WORLD);
-            }
-        }
-    }
-};
-
-class MPI_Pipeline
-{
-public:
-    void eliminate(float mat[][N], int rank, int num_proc)
-    {
-        int seg = task * num_proc;
-        //    计算当前进程的前一进程及下一进程
-        int pre_proc = (rank + (num_proc - 1)) % num_proc;
-        int next_proc = (rank + 1) % num_proc;
-        for (int k = 0; k < N; k++)
-        {
-            //        判断当前行是否是自己的任务
-            if (int((k % seg) / task) == rank)
-            {
-                for (int j = k + 1; j < N; j++)
-                    mat[k][j] = mat[k][j] / mat[k][k];
-                mat[k][k] = 1.0;
-                //            处理完自己的任务后向下一进程发送消息
-                MPI_Send(mat[k], N, MPI_FLOAT, next_proc, 2, MPI_COMM_WORLD);
-            }
-            else
-            {
-                //            如果当前行不是当前进程的任务，则接收前一进程的消息
-                MPI_Recv(mat[k], N, MPI_FLOAT, pre_proc, 2,
-                         MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-                //            如果当前行不是下一进程的任务，需将消息进行传递
-                if (int((k % seg) / task) != next_proc)
-                    MPI_Send(mat[k], N, MPI_FLOAT, next_proc, 2, MPI_COMM_WORLD);
-            }
-            for (int i = k + 1; i < N; i++)
-            {
-                if (int((i % seg) / task) == rank)
-                {
-                    for (int j = k + 1; j < N; j++)
-                        mat[i][j] = mat[i][j] - mat[i][k] * mat[k][j];
-                    mat[i][k] = 0.0;
-                }
-            }
-        }
-    }
-
-    void run()
-    {
-        timeval t_start;
-        timeval t_end;
-
-        int num_proc;
-        int rank;
-
-        MPI_Comm_size(MPI_COMM_WORLD, &num_proc);
-        MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-
-        int seg = task * num_proc;
-        if (rank == 0)
-        {
-            reset_mat(mat, test);
-            gettimeofday(&t_start, NULL);
-            //        在0号进程进行任务划分
-            for (int i = 0; i < N; i++)
-            {
-                int flag = (i % seg) / task;
-                if (flag == rank)
-                    continue;
-                else
-                    MPI_Send(mat[i], N, MPI_FLOAT, flag, 0, MPI_COMM_WORLD);
-            }
-            eliminate(mat, rank, num_proc);
-            //        处理完0号进程自己的任务后需接收其他进程处理之后的结果
-            for (int i = 0; i < N; i++)
-            {
-                int flag = (i % seg) / task;
-                if (flag == rank)
-                    continue;
-                else
-                    MPI_Recv(mat[i], N, MPI_FLOAT, flag, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            }
-            gettimeofday(&t_end, NULL);
-            cout << "Pipeline MPI LU time cost: "
-                 << 1000 * (t_end.tv_sec - t_start.tv_sec) +
-                        0.001 * (t_end.tv_usec - t_start.tv_usec)
-                 << "ms" << endl;
-            print_mat(mat);
-        }
-        else
-        {
-            //        非0号进程先接收任务
-            for (int i = task * rank; i < N; i += seg)
-            {
-                for (int j = 0; j < task && i + j < N; j++)
-                    MPI_Recv(mat[i + j], N, MPI_FLOAT, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            }
-            eliminate(mat, rank, num_proc);
-            //        处理完后向零号进程返回结果
-            for (int i = task * rank; i < N; i += seg)
-            {
-                for (int j = 0; j < task && i + j < N; j++)
-                    MPI_Send(mat[i + j], N, MPI_FLOAT, 0, 1, MPI_COMM_WORLD);
-            }
-        }
-    }
-
-    void eliminate_opt(float mat[][N], int rank, int num_proc)
-    {
-        __m128 t1, t2, t3;
-        int seg = task * num_proc;
-        int pre_proc = (rank + (num_proc - 1)) % num_proc;
-        int next_proc = (rank + 1) % num_proc;
-#pragma omp parallel num_threads(thread_count)
-        for (int k = 0; k < N; k++)
-        {
-            if (int((k % seg) / task) == rank)
-            {
-                float temp1[4] = {mat[k][k], mat[k][k], mat[k][k], mat[k][k]};
-                t1 = _mm_loadu_ps(temp1);
-                int j = k + 1;
-#pragma omp for schedule(guided, 20)
-                for (j; j < N - 3; j += 4)
-                {
-                    t2 = _mm_loadu_ps(mat[k] + j);
-                    t3 = _mm_div_ps(t2, t1);
-                    _mm_storeu_ps(mat[k] + j, t3);
-                }
-#pragma omp for schedule(guided, 20)
-                for (j; j < N; j++)
-                {
-                    mat[k][j] = mat[k][j] / mat[k][k];
-                }
-                mat[k][k] = 1.0;
-                MPI_Send(mat[k], N, MPI_FLOAT, next_proc, 2, MPI_COMM_WORLD);
-            }
-            else
-            {
-                MPI_Recv(mat[k], N, MPI_FLOAT, pre_proc, 2,
-                         MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-                if (int((k % seg) / task) != next_proc)
-                    MPI_Send(mat[k], N, MPI_FLOAT, next_proc, 2, MPI_COMM_WORLD);
-            }
-            for (int i = k + 1; i < N; i++)
-            {
-                if (int((i % seg) / task) == rank)
-                {
-                    float temp2[4] = {mat[i][k], mat[i][k], mat[i][k], mat[i][k]};
-                    t1 = _mm_loadu_ps(temp2);
-                    int j = k + 1;
-#pragma omp for schedule(guided, 20)
-                    for (j; j <= N - 3; j += 4)
-                    {
-                        t2 = _mm_loadu_ps(mat[i] + j);
-                        t3 = _mm_loadu_ps(mat[k] + j);
-                        t3 = _mm_mul_ps(t1, t3);
-                        t2 = _mm_sub_ps(t2, t3);
-                        _mm_storeu_ps(mat[i] + j, t2);
-                    }
-#pragma omp for schedule(guided, 20)
-                    for (j; j < N; j++)
-                        mat[i][j] = mat[i][j] - mat[i][k] * mat[k][j];
-                    mat[i][k] = 0;
-                }
-            }
-        }
-    }
-
-    void run_opt()
-    {
-        timeval t_start;
-        timeval t_end;
-
-        int num_proc;
-        int rank;
-
-        MPI_Comm_size(MPI_COMM_WORLD, &num_proc);
-        MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-
-        int seg = task * num_proc;
-        if (rank == 0)
-        {
-            reset_mat(mat, test);
-            gettimeofday(&t_start, NULL);
-            for (int i = 0; i < N; i++)
-            {
-                int flag = (i % seg) / task;
-                if (flag == rank)
-                    continue;
-                else
-                    MPI_Send(mat[i], N, MPI_FLOAT, flag, 0, MPI_COMM_WORLD);
-            }
-            eliminate_opt(mat, rank, num_proc);
-            for (int i = 0; i < N; i++)
-            {
-                int flag = (i % seg) / task;
-                if (flag == rank)
-                    continue;
-                else
-                    MPI_Recv(mat[i], N, MPI_FLOAT, flag, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            }
-            gettimeofday(&t_end, NULL);
-            cout << "Pipeline MPI LU with SSE and OpenMP time cost: "
-                 << 1000 * (t_end.tv_sec - t_start.tv_sec) +
-                        0.001 * (t_end.tv_usec - t_start.tv_usec)
-                 << "ms" << endl;
-            print_mat(mat);
-        }
-        else
-        {
-            for (int i = task * rank; i < N; i += seg)
-            {
-                for (int j = 0; j < task && i + j < N; j++)
-                    MPI_Recv(mat[i + j], N, MPI_FLOAT, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            }
-            eliminate_opt(mat, rank, num_proc);
-            for (int i = task * rank; i < N; i += seg)
-            {
-                for (int j = 0; j < task && i + j < N; j++)
-                    MPI_Send(mat[i + j], N, MPI_FLOAT, 0, 1, MPI_COMM_WORLD);
-            }
-        }
-    }
-};
-
-int main()
-{
-    init_mat(test);
-
+ 	thread_count = atoi(argv[2]);
+    n = atoi(argv[1]);
     MPI_Init(NULL, NULL);
-
-    MPI_Block mpi_block;
-    mpi_block.run();
-    mpi_block.run_opt();
-
-    MPI_Recycle mpi_recycle;
-    mpi_recycle.run();
-    mpi_recycle.run_opt();
-
-    MPI_Pipeline mpi_pipeline;
-    mpi_pipeline.run();
-    mpi_pipeline.run_opt();
-
+    init();
+    block_run(0);
+	block_run(1);
+	recycle_run(0);
+	recycle_run(1);
+	recycle_run(2);
+	recycle_run(3);
+    release_matrix();
     MPI_Finalize();
     return 0;
+}
+
+void block_run(int version) {
+    //块划分
+	void (*f)(int,int);
+	string inform = "";
+	if (version == 0) {
+		f = &block_gauss;
+		inform = "block assign time is: ";
+	}
+	else if (version == 1) {
+		f = &block_gauss_opt;
+		inform = "block assign opt time is: ";
+	}
+	timeval begin, finish;
+
+    int num_proc;
+    int my_rank;
+
+    MPI_Comm_size(MPI_COMM_WORLD, &num_proc);
+    MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
+
+    int block_size = n / num_proc;
+    int remain = n % num_proc;
+    if (my_rank == 0) {
+		arr_reset();
+        gettimeofday(&begin, NULL);
+        for (int i = 1; i < num_proc; i++) {
+            int upper_bound = i != num_proc - 1 ? block_size : block_size + remain;
+            for (int j = 0; j < upper_bound; j++)
+                MPI_Send(A[i * block_size + j], n, MPI_FLOAT, i, 0, MPI_COMM_WORLD);
+        }
+        f(my_rank, num_proc);
+        for (int i = 1; i < num_proc; i++) { 
+            int upper_bound = i != num_proc - 1 ? block_size : block_size + remain;
+            for (int j = 0; j < upper_bound; j++)
+                MPI_Recv(A[i * block_size + j], n, MPI_FLOAT, i, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        }
+        testResult();
+        gettimeofday(&finish, NULL);
+        cout << inform << millitime(finish) - millitime(begin) << "ms" << endl; 
+    }
+    else {
+        int upper_bound = my_rank != num_proc - 1 ? block_size : block_size + remain;
+        for (int j = 0; j < upper_bound; j++)
+            MPI_Recv(A[my_rank * block_size + j], n, MPI_FLOAT, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        f(my_rank, num_proc);
+        for (int j = 0; j < upper_bound; j++)
+            MPI_Send(A[my_rank * block_size + j], n, MPI_FLOAT, 0, 1, MPI_COMM_WORLD);
+    }
+}
+
+void block_gauss(int my_rank, int num_proc) {
+    int block_size = n / num_proc;
+    int remain = n % num_proc;
+
+    int my_begin = my_rank * block_size;
+    int my_end = my_rank == num_proc - 1 ? my_begin + block_size + remain : my_begin + block_size;
+    for (int k = 0; k < n; k++) {
+        if (k >= my_begin && k < my_end) {
+            float ele = A[k][k];
+            for (int j = k + 1; j < n; j++)
+                A[k][j] = A[k][j] / ele;
+            A[k][k] = 1.0;
+            for (int p = my_rank + 1; p < num_proc; p++)
+                MPI_Send(A[k], n, MPI_FLOAT, p, 2, MPI_COMM_WORLD);
+        }
+        else {
+            int current_work_p = k / block_size;
+            if (current_work_p < my_rank)
+                MPI_Recv(A[k], n, MPI_FLOAT, current_work_p, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        }
+        for (int i = my_begin; i < my_end; i++) {
+            if (i > k) {
+                for (int j = k + 1; j < n; j++){
+                    A[i][j] = A[i][j] - A[i][k] * A[k][j]; 
+                }
+                A[i][k] = 0.0;
+            }
+        }
+    }
+
+}
+
+void block_gauss_opt(int my_rank, int num_proc) {	
+	__m128 v0, v1, v2;
+    int block_size = n / num_proc;
+    int remain = n % num_proc;
+
+    int my_begin = my_rank * block_size;
+    int my_end = my_rank == num_proc - 1 ? my_begin + block_size + remain : my_begin + block_size;
+	int k, j, i;
+	#pragma omp parallel num_threads(thread_count), private(v0, v1, v2, k, j, i)
+    for (k = 0; k < n; k++) {
+		#pragma omp single 
+		{
+    	    if (k >= my_begin && k < my_end) {
+            	v1 = _mm_set_ps(A[k][k], A[k][k], A[k][k], A[k][k]);
+            	for (j = k + 1; j <= n - 4; j += 4) {
+					v0 = _mm_loadu_ps(A[k] + j);
+   	            	v0 = _mm_div_ps(v0, v1);
+                	_mm_storeu_ps(A[k] + j, v0);
+            	}
+				float ele = A[k][k];
+            	for (j; j < n; j++)
+            	    A[k][j] = A[k][j] / ele;
+            	A[k][k] = 1.0;
+    	        for (j = my_rank + 1; j < num_proc; j++)
+    	            MPI_Send(A[k], n, MPI_FLOAT, j, 2, MPI_COMM_WORLD);
+    	    }
+    	    else {
+    	        int current_work_p = k / block_size;
+    	        if (current_work_p < my_rank)
+    	            MPI_Recv(A[k], n, MPI_FLOAT, current_work_p, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    	    }
+		}
+		#pragma omp for
+        for (i = my_begin; i < my_end; i++) {
+			if (i <= k) 
+				continue;
+			v1 = _mm_set_ps(A[i][k], A[i][k], A[i][k], A[i][k]);
+			for (j = k + 1; j <= n - 4; j += 4) {
+			    v2 = _mm_loadu_ps(A[k] + j);
+                v0 = _mm_loadu_ps(A[i] + j);
+                v2 = _mm_mul_ps(v1, v2);
+                v0 = _mm_sub_ps(v0, v2);
+				_mm_storeu_ps(A[i] + j, v0);
+			}
+			for (j; j < n; j++)
+				A[i][j] = A[i][j] - A[i][k] * A[k][j];
+			A[i][k] = 0.0;
+        }
+    }
+}
+
+void recycle_run(int version) {
+	//循环划分
+	void (*f)(int,int);
+	string inform = "";
+	if (version == 0) {
+		f = &recycle_gauss;
+		inform = "recycle assign time is: ";
+	}
+	else if (version == 1) {
+		f = &recycle_gauss_opt;
+		inform = "recycle assign opt time is: ";
+	}
+	else if (version == 2) {
+		f = &recycle_pipeline_gauss;
+		inform = "recycle assign pipeline time is: ";
+	}
+	else if (version == 3) {
+		f = &recycle_pipeline_gauss_opt;
+		inform = "recycle assign pipeline opt time is: ";
+	}
+	timeval begin, finish;
+
+    int num_proc;
+    int my_rank;
+
+    MPI_Comm_size(MPI_COMM_WORLD, &num_proc);
+    MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
+
+    if (my_rank == 0) {
+		arr_reset();
+        gettimeofday(&begin, NULL);
+		for (int i = 0; i < n; i++) {
+			int pro_row = i % num_proc;
+			if (pro_row != my_rank)
+				MPI_Send(A[i], n, MPI_FLOAT, pro_row, 0, MPI_COMM_WORLD);
+		}
+        f(my_rank, num_proc);
+		for (int i = 0; i < n; i++) {
+			int pro_row = i % num_proc;
+			if (pro_row != my_rank) 
+				MPI_Recv(A[i], n, MPI_FLOAT, pro_row, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+		}
+        testResult();
+        gettimeofday(&finish, NULL);
+        cout << inform << millitime(finish) - millitime(begin) << "ms" << endl; 
+    }
+    else {
+        for (int j = my_rank; j < n; j += num_proc)
+            MPI_Recv(A[j], n, MPI_FLOAT, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        f(my_rank, num_proc);
+        for (int j = my_rank; j < n; j += num_proc)
+            MPI_Send(A[j], n, MPI_FLOAT, 0, 1, MPI_COMM_WORLD);
+    }
+}
+
+void recycle_gauss(int my_rank, int num_proc) {
+    for (int k = 0; k < n; k++) {
+        if (k % num_proc == my_rank) {
+            float ele = A[k][k];
+            for (int j = k + 1; j < n; j++)
+                A[k][j] = A[k][j] / ele;
+            A[k][k] = 1.0;
+            for (int j = 0; j < num_proc; j++)
+				if (j != my_rank)
+                	MPI_Send(A[k], n, MPI_FLOAT, j, 2, MPI_COMM_WORLD);
+        }
+        else {
+            int current_work_p = k % num_proc;
+            MPI_Recv(A[k], n, MPI_FLOAT, current_work_p, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        }
+        for (int i = my_rank; i < n; i += num_proc) {
+            if (i > k) {
+                for (int j = k + 1; j < n; j++){
+                    A[i][j] = A[i][j] - A[i][k] * A[k][j]; 
+                }
+                A[i][k] = 0.0;
+            }
+        }
+    }
+}
+
+void recycle_gauss_opt(int my_rank, int num_proc) {
+	__m128 v0, v1, v2;
+	int k, j, i;
+	#pragma omp parallel num_threads(thread_count), private(k, j, i, v0, v1, v2)
+    for (k = 0; k < n; k++) {
+		#pragma omp single
+		{
+    	    if (k % num_proc == my_rank) {
+				v1 = _mm_set_ps(A[k][k], A[k][k], A[k][k], A[k][k]);
+    	        for (j = k + 1; j <= n - 4; j += 4) {
+					v0 = _mm_loadu_ps(A[k] + j);
+					v0 = _mm_div_ps(v0, v1);
+					_mm_storeu_ps(A[k] + j, v0);
+				}
+				float ele = A[k][k];
+				for (j; j < n; j++)
+    	            A[k][j] = A[k][j] / ele;
+    	        A[k][k] = 1.0;
+    	        for (j = 0; j < num_proc; j++)
+					if (j != my_rank)
+        	        	MPI_Send(A[k], n, MPI_FLOAT, j, 2, MPI_COMM_WORLD);
+        	}
+        	else {
+        	    int current_work_p = k % num_proc;
+        	    MPI_Recv(A[k], n, MPI_FLOAT, current_work_p, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        	}
+		}
+		#pragma omp for
+        for (i = my_rank; i < n; i += num_proc) {
+            if (i <= k) 
+				continue;
+			v1 = _mm_set_ps(A[i][k], A[i][k], A[i][k], A[i][k]);
+            for (j = k + 1; j <= n - 4; j += 4){
+ 			    v2 = _mm_loadu_ps(A[k] + j);
+                v0 = _mm_loadu_ps(A[i] + j);
+                v2 = _mm_mul_ps(v1, v2);
+                v0 = _mm_sub_ps(v0, v2);
+				_mm_storeu_ps(A[i] + j, v0);
+            }
+			for (j; j < n; j++)
+                A[i][j] = A[i][j] - A[i][k] * A[k][j]; 
+            A[i][k] = 0.0;
+        }
+    }
+}
+
+void recycle_pipeline_gauss(int my_rank, int num_proc) {
+ 	int pre_rank = (my_rank - 1 + num_proc) % num_proc;
+	int nex_rank = (my_rank + 1) % num_proc;
+    for (int k = 0; k < n; k++) {
+        if (k % num_proc == my_rank) {
+            float ele = A[k][k];
+            for (int j = k + 1; j < n; j++)
+                A[k][j] = A[k][j] / ele;
+            A[k][k] = 1.0;
+			if (nex_rank != my_rank)
+	            MPI_Send(A[k], n, MPI_FLOAT, nex_rank, 2, MPI_COMM_WORLD);
+        }
+        else {
+            MPI_Recv(A[k], n, MPI_FLOAT, pre_rank, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+			if (k % num_proc != nex_rank)
+				MPI_Send(A[k], n, MPI_FLOAT, nex_rank, 2, MPI_COMM_WORLD);
+        }
+        for (int i = my_rank; i < n; i += num_proc) {
+            if (i > k) {
+                for (int j = k + 1; j < n; j++){
+                    A[i][j] = A[i][j] - A[i][k] * A[k][j]; 
+                }
+                A[i][k] = 0.0;
+            }
+        }
+    }
+}
+
+void recycle_pipeline_gauss_opt(int my_rank, int num_proc) {
+	int pre_rank = (my_rank - 1 + num_proc) % num_proc;
+	int nex_rank = (my_rank + 1) % num_proc;
+	__m128 v0, v1, v2;
+	int k, j, i;
+	#pragma omp parallel num_threads(thread_count), private(k, j, i, v0, v1, v2)
+    for (k = 0; k < n; k++) {
+		#pragma omp single
+		{
+    	    if (k % num_proc == my_rank) {
+				v1 = _mm_set_ps(A[k][k], A[k][k], A[k][k], A[k][k]);
+    	        for (j = k + 1; j <= n - 4; j += 4) {
+					v0 = _mm_loadu_ps(A[k] + j);
+					v0 = _mm_div_ps(v0, v1);
+					_mm_storeu_ps(A[k] + j, v0);
+				}
+				float ele = A[k][k];
+				for (j; j < n; j++)
+    	            A[k][j] = A[k][j] / ele;
+    	        A[k][k] = 1.0;
+				if (nex_rank != my_rank)
+        	    	MPI_Send(A[k], n, MPI_FLOAT, nex_rank, 2, MPI_COMM_WORLD);
+        	}
+        	else {
+        	    MPI_Recv(A[k], n, MPI_FLOAT, pre_rank, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+				if (nex_rank != k % num_proc)
+					MPI_Send(A[k], n, MPI_FLOAT, nex_rank, 2, MPI_COMM_WORLD);
+        	}
+		}
+		#pragma omp for
+        for (i = my_rank; i < n; i += num_proc) {
+            if (i <= k) 
+				continue;
+			v1 = _mm_set_ps(A[i][k], A[i][k], A[i][k], A[i][k]);
+            for (j = k + 1; j <= n - 4; j += 4){
+ 			    v2 = _mm_loadu_ps(A[k] + j);
+                v0 = _mm_loadu_ps(A[i] + j);
+                v2 = _mm_mul_ps(v1, v2);
+                v0 = _mm_sub_ps(v0, v2);
+				_mm_storeu_ps(A[i] + j, v0);
+            }
+			for (j; j < n; j++)
+                A[i][j] = A[i][j] - A[i][k] * A[k][j]; 
+            A[i][k] = 0.0;
+        }
+    }
 }
